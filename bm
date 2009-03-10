@@ -1,37 +1,69 @@
 #!/usr/bin/env ruby
 
+require 'pp'
 require 'rubygems'
 require 'addressable/uri'
-#require 'tokyocabinet'
+require 'xapian'
+require 'nokogiri'
+require 'json'
 
-#include TokyoCabinet
+require File.dirname(__FILE__) + "/lib/simplehttpclient"
 
 module BookMarker
 
-  class DB
+  class Index
     def initialize(path)
-      # Open the database
-      @tdb = TDB::new
-      if !@tdb.open("casket.tch", HDB::OWRITER | HDB::OCREAT)
-        raise @tdb.ecode
-      end
+
+      @path = path
+      @prefixes = {'title' => "S", 'uri' => "T"}
     end
 
-    def write(uri, category)
-      unless @tdb.put(uri, { :uri => uri, :category => category })
-        raise @tdb.ecode
-      end
+    def open_for_writing
+      FileUtils.mkdir_p(File.dirname(@path)) unless File.exists?(File.dirname(@path))
+
+      @database = Xapian::WritableDatabase.new(@path, Xapian::DB_CREATE_OR_OPEN)
+      @indexer = Xapian::TermGenerator.new()
+      @indexer.set_flags(Xapian::TermGenerator::FLAG_SPELLING, 0)
+      @indexer.database = @database
     end
 
-    def query(query)
-      qry = TDBQRY::new(@tdb)
-      qry.addcond(query, TDBQRY::QCSTROR, "en")
-      qry.setmax(10)
+    def open_for_reading
+      @database = Xapian::Database.new(@path)
+      @enquire = Xapian::Enquire.new(@database)
 
-      res = qry.search
-      res.each do |rkey|
-       rcols = @tdb.get(rkey)
-       yield rcols
+      @query_parser = Xapian::QueryParser.new
+      @query_parser.database = @database
+      @query_parser.add_boolean_prefix('title', @prefixes['title'])
+      @query_parser.add_boolean_prefix('uri', @prefixes['uri'])
+    end
+
+    def add_uri(document)
+      doc = Xapian::Document.new()
+
+      doc.data = JSON({:uri => document[:uri]})
+      @indexer.document = doc
+      @indexer.index_text(document[:uri], 10, @prefixes['uri'])
+      @indexer.index_text(document[:body])
+      @indexer.index_text(document[:title], 10, @prefixes['title'])
+      @database.add_document(doc)
+    end
+
+    def run_query(query, number_of_results=100)
+      query = @query_parser.parse_query(query,
+                          Xapian::QueryParser::FLAG_BOOLEAN | Xapian::QueryParser::FLAG_PHRASE |
+                          Xapian::QueryParser::FLAG_LOVEHATE | Xapian::QueryParser::FLAG_WILDCARD)
+
+      @enquire.query = query
+      @enquire.sort_by_relevance!
+      @matchset = @enquire.mset(0, number_of_results)
+      @matchset
+    end
+
+    def results(threshold=0.0)
+      max_score = @matchset.matches.first.percent
+      @matchset.matches.each do |m|
+        break if m.percent < max_score * threshold
+        yield m
       end
     end
   end
@@ -39,30 +71,68 @@ module BookMarker
   class BM
     def initialize
       config = get_config
-      @db = DB.new(config[:db][:path])
+      @index = Index.new(config[:db][:path])
     end
 
     def write(uri, category)
-      @db.write(uri, category)
+      validate_uri(uri)
+      reponse, html = download_uri(uri)
+
+      title, body = process_document(html)
+
+      @index.open_for_writing
+      @index.add_uri({:uri => uri, :title => title, :body => body, :category => category})
+    end
+
+    def search(query)
+      @index.open_for_reading
+      @index.run_query(query)
+      @index.results do |r|
+        yield r
+      end
     end
 
     private
     def get_config
       YAML::load(File.open("#{ENV['HOME']}/.bookmarker").read)
     end
+
+    def validate_uri(uri)
+      u = Addressable::URI::heuristic_parse(uri)
+      raise "Unsupported scheme" if u.scheme != "http" && u.scheme != "https"
+    end
+
+    def download_uri(uri)
+      user_agent = "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.6) Gecko/20070725 Firefox/2.0.0.6"
+      agent = SimpleHttpClient.new(user_agent, 20.0)
+
+      response, response_body = agent.get(uri)
+    end
+
+    def process_document(html)
+      document = Nokogiri(html)
+      title = document.search('//title').inner_text.strip
+      body = document.search('//body').inner_text.strip
+      return title, body
+    end
   end
 end
 
 uri = ARGV[0]
+usage = "usage: #{$0} <uri> <category>"
 
 if uri.nil?
   uri = `xsel -o`
-else
-  puts "usage: #{$0} <uri> <category>"
-  exit 1
+  if uri.nil? || uri.empty?
+    puts usage
+    exit 1
+  end
 end
 
+puts uri
 category = (ARGV[1].nil?) ? "unclassified" : ARGV[1]
 
 bm = BookMarker::BM.new
 bm.write(uri, category)
+
+bm.search("directed") { |r| pp JSON.parse(r.document.data) }
