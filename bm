@@ -1,0 +1,68 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'addressable/uri'
+#require 'tokyocabinet'
+
+#include TokyoCabinet
+
+module BookMarker
+
+  class DB
+    def initialize(path)
+      # Open the database
+      @tdb = TDB::new
+      if !@tdb.open("casket.tch", HDB::OWRITER | HDB::OCREAT)
+        raise @tdb.ecode
+      end
+    end
+
+    def write(uri, category)
+      unless @tdb.put(uri, { :uri => uri, :category => category })
+        raise @tdb.ecode
+      end
+    end
+
+    def query(query)
+      qry = TDBQRY::new(@tdb)
+      qry.addcond(query, TDBQRY::QCSTROR, "en")
+      qry.setmax(10)
+
+      res = qry.search
+      res.each do |rkey|
+       rcols = @tdb.get(rkey)
+       yield rcols
+      end
+    end
+  end
+
+  class BM
+    def initialize
+      config = get_config
+      @db = DB.new(config[:db][:path])
+    end
+
+    def write(uri, category)
+      @db.write(uri, category)
+    end
+
+    private
+    def get_config
+      YAML::load(File.open("#{ENV['HOME']}/.bookmarker").read)
+    end
+  end
+end
+
+uri = ARGV[0]
+
+if uri.nil?
+  uri = `xsel -o`
+else
+  puts "usage: #{$0} <uri> <category>"
+  exit 1
+end
+
+category = (ARGV[1].nil?) ? "unclassified" : ARGV[1]
+
+bm = BookMarker::BM.new
+bm.write(uri, category)
