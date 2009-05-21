@@ -5,6 +5,7 @@ require 'rubygems'
 require 'addressable/uri'
 require 'xapian'
 require 'nokogiri'
+require 'couchrest'
 require 'json'
 
 require File.dirname(__FILE__) + "/lib/simplehttpclient"
@@ -69,19 +70,43 @@ module BookMarker
   end
 
   class BM
+    UNKNOWN = 0
+    DOWNLOADED = 1
+    ERROR = 2
+
     def initialize
       config = get_config
       @index = Index.new(config[:db][:path])
+      couchdb = CouchRest.new("http://localhost:5984")
+      @db = couchdb.database('bookmarks')
     end
 
-    def write(uri, category)
-      validate_uri(uri)
-      reponse, html = download_uri(uri)
+    def add(uri, category)
+      begin
+        @db.save_doc('_id' => Digest::SHA1.hexdigest(uri), :uri => uri, :category => category, :status => UNKNOWN)
+      rescue RestClient::RequestFailed => e
+        puts e
+      end
+    end
 
-      title, body = process_document(html)
+    def write
+      @db.view('bm/unprocessed')["rows"].each do |e|
+        uri = e["value"][0]
+        category = e["value"][0]
 
-      @index.open_for_writing
-      @index.add_uri({:uri => uri, :title => title, :body => body, :category => category})
+        validate_uri(uri)
+        begin
+          reponse, html = download_uri(uri)
+          if reponse == 200
+            title, body = process_document(html)
+
+            @index.open_for_writing
+            @index.add_uri({:uri => uri, :title => title, :body => body, :category => category})
+          end
+        rescue => e
+          puts e
+        end
+      end
     end
 
     def search(query)
@@ -105,8 +130,7 @@ module BookMarker
     def download_uri(uri)
       user_agent = "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.6) Gecko/20070725 Firefox/2.0.0.6"
       agent = SimpleHttpClient.new(user_agent, 20.0)
-
-      response, response_body = agent.get(uri)
+      return agent.get(uri)
     end
 
     def process_document(html)
@@ -133,6 +157,8 @@ puts uri
 category = (ARGV[1].nil?) ? "unclassified" : ARGV[1]
 
 bm = BookMarker::BM.new
-bm.write(uri, category)
 
-bm.search("directed") { |r| pp JSON.parse(r.document.data) }
+bm.add(uri, category)
+bm.write
+
+#bm.search("directed") { |r| pp JSON.parse(r.document.data) }
