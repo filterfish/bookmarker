@@ -16,5 +16,5 @@ spec = Gem::Specification.new do |s|
 
   s.executables = Dir::glob("bin/*").map{|exe| File::basename exe}
 
-  s.files = Dir.glob("{bin,lib/**/*}")
+  s.files = Dir.glob("{bin/*,lib/**/*}")
 end
