@@ -4,14 +4,14 @@ require 'rubygems'
 require 'couchrest'
 
 couchdb = CouchRest.new("http://localhost:5984")
-db = couchdb.database('bookmarks')
+db = couchdb.database('bookmarker')
 
 db.delete_doc(db.get("_design/bm")) rescue nil
 
 db.save_doc({
   "_id" => "_design/bm",
   :views => {
-    :unprocessed => {:map => "function(doc) {if (doc.status != '0') emit(null, [doc.uri, doc.category]);}"},
-    :processed => {:map => "function(doc) {if (doc.status == '0') emit([doc.uri], null);}"}
+    :unprocessed => {:map => "function(doc) {if (doc.status == '0') emit(null, doc);}"},
+    :processed => {:map => "function(doc) {if (doc.status != '0') emit(null, doc);}"}
   }
 })

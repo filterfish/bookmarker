@@ -1,10 +1,9 @@
 #!/usr/bin/env ruby
 
-require 'pp'
 require 'zlib'
 require 'stringio'
 require 'net/http'
-require 'rubygems'
+
 require File.dirname(__FILE__) + '/uri_utilities'
 
 class SimpleHttpClient 
@@ -138,6 +137,8 @@ class SimpleHttpClient
 end
 
 if $PROGRAM_NAME == __FILE__
+
+  require 'pp'
 
   uri = ARGV[0]
   if uri.nil?

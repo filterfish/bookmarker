@@ -1,12 +1,12 @@
 #!/usr/bin/env ruby
 
 require 'pp'
-require 'rubygems'
 require 'addressable/uri'
-require 'xapian'
 require 'nokogiri'
+require 'xapian'
 require 'couchrest'
 require 'json'
+require 'yaml'
 
 require File.dirname(__FILE__) + "/lib/simplehttpclient"
 
@@ -16,7 +16,7 @@ module BookMarker
     def initialize(path)
 
       @path = path
-      @prefixes = {'title' => "S", 'uri' => "T"}
+      @prefixes = {'title' => "S", 'url' => "T"}
     end
 
     def open_for_writing
@@ -35,15 +35,15 @@ module BookMarker
       @query_parser = Xapian::QueryParser.new
       @query_parser.database = @database
       @query_parser.add_boolean_prefix('title', @prefixes['title'])
-      @query_parser.add_boolean_prefix('uri', @prefixes['uri'])
+      @query_parser.add_boolean_prefix('url', @prefixes['url'])
     end
 
-    def add_uri(document)
+    def add(document)
       doc = Xapian::Document.new()
 
-      doc.data = JSON({:uri => document[:uri]})
+      doc.data = JSON(document)
       @indexer.document = doc
-      @indexer.index_text(document[:uri], 10, @prefixes['uri'])
+      @indexer.index_text(document[:url], 10, @prefixes['url'])
       @indexer.index_text(document[:body])
       @indexer.index_text(document[:title], 10, @prefixes['title'])
       @database.add_document(doc)
@@ -61,9 +61,8 @@ module BookMarker
     end
 
     def results(threshold=0.0)
-      max_score = @matchset.matches.first.percent
       @matchset.matches.each do |m|
-        break if m.percent < max_score * threshold
+      #  break if m.percent < max_score * threshold
         yield m
       end
     end
@@ -71,66 +70,79 @@ module BookMarker
 
   class BM
     UNKNOWN = 0
-    DOWNLOADED = 1
-    ERROR = 2
 
     def initialize
-      config = get_config
       @index = Index.new(config[:db][:path])
       couchdb = CouchRest.new("http://localhost:5984")
-      @db = couchdb.database('bookmarks')
+      @db = couchdb.database('bookmarker')
     end
 
-    def add(uri, category)
+    def add(url, category)
       begin
-        @db.save_doc('_id' => Digest::SHA1.hexdigest(uri), :uri => uri, :category => category, :status => UNKNOWN)
+        validate_url(url)
+        @db.save_doc('_id' => Digest::SHA1.hexdigest(url), :url => url, :category => category, :status => UNKNOWN)
       rescue RestClient::RequestFailed => e
-        puts e
+        puts "#{url} already in cache"
+      rescue RuntimeError
+        puts "Invalid URL"
       end
     end
 
     def write
       @db.view('bm/unprocessed')["rows"].each do |e|
-        uri = e["value"][0]
-        category = e["value"][0]
 
-        validate_uri(uri)
+        doc = e['value']
+
         begin
-          reponse, html = download_uri(uri)
-          if reponse == 200
+          response, html = download_url(doc['url'])
+          if response.is_a? Net::HTTPOK
             title, body = process_document(html)
 
+            res = @db.save_doc('_id' => doc['_id'], 'url' => doc['url'], 'category' => doc['category'], 'status' => 200, '_rev' => doc['_rev'])
+
+            if res['ok']
+              puts "#{doc['url']} added to index"
+            end
             @index.open_for_writing
-            @index.add_uri({:uri => uri, :title => title, :body => body, :category => category})
+            @index.add({:url => doc['url'], :title => title, :body => body, :category => doc['category']})
           end
-        rescue => e
-          puts e
+        rescue RuntimeError => e
+          if e.message == 'Unsupported scheme'
+            puts "Invalid URL"
+          end
+        rescue SocketError => e
+          # There is a problem getting the uri so do nothing. We'll get
+          # it next time we're online.
         end
       end
     end
 
     def search(query)
-      @index.open_for_reading
-      @index.run_query(query)
-      @index.results do |r|
-        yield r
+      begin
+        @index.open_for_reading
+        @index.run_query(query)
+        @index.results do |r|
+          yield r
+        end
+      rescue IOError => e
+        puts "You don't appear to have added any urls! Please add some before you search."
       end
     end
 
     private
-    def get_config
-      YAML::load(File.open("#{ENV['HOME']}/.bookmarker").read)
+    def config
+      YAML::load(File.open("#{ENV['HOME']}/.bookmarkerrc").read)
     end
 
-    def validate_uri(uri)
-      u = Addressable::URI::heuristic_parse(uri)
+    def validate_url(url)
+      u = Addressable::URI::heuristic_parse(url)
       raise "Unsupported scheme" if u.scheme != "http" && u.scheme != "https"
     end
 
-    def download_uri(uri)
+    def download_url(url)
       user_agent = "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.6) Gecko/20070725 Firefox/2.0.0.6"
       agent = SimpleHttpClient.new(user_agent, 20.0)
-      return agent.get(uri)
+      return agent.get(url)
     end
 
     def process_document(html)
@@ -142,23 +154,29 @@ module BookMarker
   end
 end
 
-uri = ARGV[0]
-usage = "usage: #{$0} <uri> <category>"
-
-if uri.nil?
-  uri = `xsel -o`
-  if uri.nil? || uri.empty?
-    puts usage
-    exit 1
-  end
+def usage
+  "usage: #{File.basename($0)} [add|search]"
+  exit 1
 end
-
-puts uri
-category = (ARGV[1].nil?) ? "unclassified" : ARGV[1]
 
 bm = BookMarker::BM.new
 
-bm.add(uri, category)
-bm.write
+if ARGV[0] == 'search'
+  search_term = ARGV[1]
+  bm.search(search_term) { |r| puts JSON.parse(r.document.data)['url'] }
+elsif ARGV[0] == 'add'
+  url = ARGV[1]
+  if url.nil?
+    url = `xsel -o`
+    if url.nil? || url.empty?
+      usage
+    end
+  end
 
-#bm.search("directed") { |r| pp JSON.parse(r.document.data) }
+  category = (ARGV[2].nil?) ? "unclassified" : ARGV[2]
+
+  bm.add(url, category)
+  bm.write
+else
+  usage
+end

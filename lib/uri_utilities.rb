@@ -1,4 +1,4 @@
-require 'rubygems'
+require 'addressable/uri'
 
 class URIUtilities
 
